@@ -6,6 +6,7 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
 
 #include "cmd.h"
 #include "utils.h"
@@ -19,6 +20,10 @@
 static bool shell_cd(word_t *dir)
 {
 	/* TODO: Execute cd. */
+	if (dir == NULL || dir->string == NULL) {
+		return false;
+	}
+
 	if (chdir(dir->string) != 0) {
 		return false;
 	}
@@ -32,7 +37,7 @@ static int shell_exit(void)
 {
 	/* TODO: Execute exit/quit. */
 	exit(SHELL_EXIT);
-	return SHELL_EXIT; /* TODO: Replace with actual exit code. */
+	//return SHELL_EXIT; /* TODO: Replace with actual exit code. */
 }
 
 /**
@@ -41,22 +46,32 @@ static int shell_exit(void)
  */
 static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
-	bool execute = true;
+	bool execute_cd = false;
+	int result = true;
 	/* TODO: Sanity checks. */
 	if (s == NULL) {
-		return 0;
+		return false;
 	}
 	/* TODO: If builtin command, execute the command. */
 	if (strcmp(s->verb->string, "cd") == 0) {
 		
 		if (s->params != NULL) {
-			execute = false;
+			execute_cd = true;
 		}
 	}
 	
 	if (strcmp(s->verb->string, "exit") == 0 || strcmp(s->verb->string, "quit") == 0) {
 		shell_exit();
 	}
+
+	if (strcmp(s->verb->string, "false") == 0) {
+		return false;
+	}
+
+	if (strcmp(s->verb->string, "true") == 0) {
+		return true;
+	}
+
 	/* TODO: If variable assignment, execute the assignment and return
 	 * the exit status.
 	 */
@@ -71,27 +86,29 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	pid_t pid = fork();
 
 	if (pid == -1) {
-		return 0;
+		return false;
 	} else if (pid == 0) { // child
+
+		// auxiliary file descriptors used for restoring
+		int orig_stdout = dup(STDOUT_FILENO);
+		int orig_stdin = dup(STDIN_FILENO);
+		int orig_stderr = dup(STDERR_FILENO);
 
 		if (s->in != NULL) {
 			int fd = -1;
 
 			if (s->io_flags == IO_REGULAR) {
 				fd = open(s->in->string, O_RDONLY);
-				DIE(fd < 0, "open");
-				dup2(fd, STDIN_FILENO);
 			} else {
 				fd = open(s->in->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
-				DIE(fd < 0, "open");
-				dup2(fd, STDERR_FILENO);
 			}
-			DIE(fd < 0, "open");
+			DIE(fd < 0, "open stdin");
+			dup2(fd, STDIN_FILENO);
 			close(fd);
 		}
 
 		if (s->out != NULL && s->err != NULL) {
-			printf("in out and err");
+
 			int f_out = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
 			int f_err = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
@@ -107,28 +124,25 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		} else {
 			if (s->out != NULL) {
 				int fd = -1;
-				printf("%s", s->out->string);
+
 				if (s->io_flags == IO_REGULAR) {
 					fd = open(s->out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-					printf("in regular %d", fd);
 				} else if (s->io_flags == IO_OUT_APPEND) {
 					fd = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
-					printf("in append");
 				}
 
-				DIE(fd < 0, "open");
+				DIE(fd < 0, "open stdout");
 				dup2(fd, STDOUT_FILENO);
 				close(fd);
 			}
 
 			if (s->err != NULL) {
 				int fd = -1;
-				printf("in err");
+
 				if (s->io_flags == IO_REGULAR) {
 					fd = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 				} else if (s->io_flags == IO_ERR_APPEND) {
 					fd = open(s->err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
-					
 				}
 
 				DIE(fd < 0, "open");
@@ -137,22 +151,35 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 			}
 		}
 
-		if (execute == true) {
+		if (!execute_cd) {
 			int argc;
 			char **argv = get_argv(s, &argc);
-			execvp(argv[0], argv);
+			if (execvp(argv[0], argv) == -1) {
+				result = false;
+			}
 		} else {
-			shell_cd(s->params);
+			result = shell_cd(s->params);	
 		}
+
+		// restore original file descriptors
+		dup2(orig_stdout, STDOUT_FILENO);
+		dup2(orig_stdin, STDIN_FILENO);
+		dup2(orig_stderr, STDERR_FILENO);
+
+		// close auxiliary file descriptors
+		close(orig_stdout);
+		close(orig_stdin);
+		close(orig_stderr);
+
 	} else {
 		int status;
 		waitpid(pid, &status, 0);
-		if (WIFEXITED(status))
-			return WEXITSTATUS(status);
-		if (WIFSIGNALED(status))
-			return WTERMSIG(status);
+		// if (WIFEXITED(status))
+		// 	return WEXITSTATUS(status);
+		// if (WIFSIGNALED(status))
+		// 	return WTERMSIG(status);
 	}
-	return 0; /* TODO: Replace with actual exit status. */
+	return result; /* TODO: Replace with actual exit status. */
 }
 
 /**
@@ -184,17 +211,21 @@ int parse_command(command_t *c, int level, command_t *father)
 {
 	/* TODO: sanity checks */
 	if (c == NULL) {
-		return 0;
+		return false;
 	}
+
+	int result = true;
+
 	if (c->op == OP_NONE) {
 		/* TODO: Execute a simple command. */
-
 		return parse_simple(c->scmd, level, father); /* TODO: Replace with actual exit code of command. */
 	}
 
 	switch (c->op) {
 	case OP_SEQUENTIAL:
 		/* TODO: Execute the commands one after the other. */
+		parse_command(c->cmd1, level + 1, c);
+		parse_command(c->cmd2, level + 1, c);
 		break;
 
 	case OP_PARALLEL:
@@ -205,12 +236,22 @@ int parse_command(command_t *c, int level, command_t *father)
 		/* TODO: Execute the second command only if the first one
 		 * returns non zero.
 		 */
+		result = parse_command(c->cmd1, level + 1, c);
+		printf("%d\n", result);
+		if (result == false) {
+			result = parse_command(c->cmd2, level + 1, c);
+		}
 		break;
 
 	case OP_CONDITIONAL_ZERO:
 		/* TODO: Execute the second command only if the first one
 		 * returns zero.
 		 */
+		result = parse_command(c->cmd1, level + 1, c);
+		printf("%d\n", result);
+		if (result == true) {
+			result = parse_command(c->cmd2, level + 1, c);
+		}
 		break;
 
 	case OP_PIPE:
@@ -223,5 +264,5 @@ int parse_command(command_t *c, int level, command_t *father)
 		return SHELL_EXIT;
 	}
 
-	return 0; /* TODO: Replace with actual exit code of command. */
+	return result; /* TODO: Replace with actual exit code of command. */
 }
