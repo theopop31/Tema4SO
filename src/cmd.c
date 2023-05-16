@@ -48,15 +48,23 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
 	bool execute_cd = false;
 	int result = true;
+	char cwd[1024];
+
 	/* TODO: Sanity checks. */
 	if (s == NULL) {
 		return false;
 	}
+
+	if (getcwd(cwd, sizeof(cwd)) == NULL) {
+		return false;
+	}
+
 	/* TODO: If builtin command, execute the command. */
 	if (strcmp(s->verb->string, "cd") == 0) {
 		
 		if (s->params != NULL) {
 			execute_cd = true;
+			result = shell_cd(s->params);	
 		}
 	}
 	
@@ -96,11 +104,14 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 
 		if (s->in != NULL) {
 			int fd = -1;
+			char input_path[1026];
+
+        	snprintf(input_path, sizeof(input_path), "%s/%s", cwd, s->in->string);
 
 			if (s->io_flags == IO_REGULAR) {
-				fd = open(s->in->string, O_RDONLY);
+				fd = open(input_path, O_RDONLY);
 			} else {
-				fd = open(s->in->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+				fd = open(input_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 			}
 			DIE(fd < 0, "open stdin");
 			dup2(fd, STDIN_FILENO);
@@ -108,9 +119,15 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		}
 
 		if (s->out != NULL && s->err != NULL) {
+			char output_path[1026];
+			char error_path[1026];
 
-			int f_out = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
-			int f_err = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+				
+        	snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
+			snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
+
+			int f_out = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+			int f_err = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
 			DIE(f_out < 0, "open stdout");
 			DIE(f_err < 0, "open stderr");
@@ -124,11 +141,14 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		} else {
 			if (s->out != NULL) {
 				int fd = -1;
+				char output_path[1026];
+
+        		snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
 
 				if (s->io_flags == IO_REGULAR) {
-					fd = open(s->out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+					fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 				} else if (s->io_flags == IO_OUT_APPEND) {
-					fd = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+					fd = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 				}
 
 				DIE(fd < 0, "open stdout");
@@ -138,11 +158,14 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 
 			if (s->err != NULL) {
 				int fd = -1;
+				char error_path[1026];
+
+				snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
 
 				if (s->io_flags == IO_REGULAR) {
-					fd = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+					fd = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 				} else if (s->io_flags == IO_ERR_APPEND) {
-					fd = open(s->err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+					fd = open(error_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 				}
 
 				DIE(fd < 0, "open");
@@ -157,8 +180,6 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 			if (execvp(argv[0], argv) == -1) {
 				result = false;
 			}
-		} else {
-			result = shell_cd(s->params);	
 		}
 
 		// restore original file descriptors
