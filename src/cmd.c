@@ -41,16 +41,19 @@ static int shell_exit(void)
  */
 static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
+	bool execute = true;
 	/* TODO: Sanity checks. */
 	if (s == NULL) {
 		return 0;
 	}
 	/* TODO: If builtin command, execute the command. */
 	if (strcmp(s->verb->string, "cd") == 0) {
-		if (s->params != NULL && s->params->next_word == NULL) {
-			shell_cd(s->params);
+		
+		if (s->params != NULL) {
+			execute = false;
 		}
 	}
+	
 	if (strcmp(s->verb->string, "exit") == 0 || strcmp(s->verb->string, "quit") == 0) {
 		shell_exit();
 	}
@@ -88,6 +91,7 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		}
 
 		if (s->out != NULL && s->err != NULL) {
+			printf("in out and err");
 			int f_out = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
 			int f_err = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
@@ -99,14 +103,17 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 
 			close(f_out);
 			close(f_err);
+
 		} else {
 			if (s->out != NULL) {
 				int fd = -1;
-
+				printf("%s", s->out->string);
 				if (s->io_flags == IO_REGULAR) {
 					fd = open(s->out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+					printf("in regular %d", fd);
 				} else if (s->io_flags == IO_OUT_APPEND) {
 					fd = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+					printf("in append");
 				}
 
 				DIE(fd < 0, "open");
@@ -116,11 +123,12 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 
 			if (s->err != NULL) {
 				int fd = -1;
-				
+				printf("in err");
 				if (s->io_flags == IO_REGULAR) {
 					fd = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 				} else if (s->io_flags == IO_ERR_APPEND) {
 					fd = open(s->err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+					
 				}
 
 				DIE(fd < 0, "open");
@@ -129,14 +137,20 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 			}
 		}
 
-		int argc;
-		char **argv = get_argv(s, &argc);
-
-		execvp(argv[0], argv);
+		if (execute == true) {
+			int argc;
+			char **argv = get_argv(s, &argc);
+			execvp(argv[0], argv);
+		} else {
+			shell_cd(s->params);
+		}
 	} else {
 		int status;
 		waitpid(pid, &status, 0);
-		return WEXITSTATUS(status);
+		if (WIFEXITED(status))
+			return WEXITSTATUS(status);
+		if (WIFSIGNALED(status))
+			return WTERMSIG(status);
 	}
 	return 0; /* TODO: Replace with actual exit status. */
 }
