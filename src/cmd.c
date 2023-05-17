@@ -37,7 +37,7 @@ static int shell_exit(void)
 {
 	/* TODO: Execute exit/quit. */
 	exit(SHELL_EXIT);
-	//return SHELL_EXIT; /* TODO: Replace with actual exit code. */
+	return SHELL_EXIT; /* TODO: Replace with actual exit code. */
 }
 
 /**
@@ -69,6 +69,7 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	}
 	
 	if (strcmp(s->verb->string, "exit") == 0 || strcmp(s->verb->string, "quit") == 0) {
+		fflush(stdout);
 		shell_exit();
 	}
 
@@ -83,6 +84,16 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	/* TODO: If variable assignment, execute the assignment and return
 	 * the exit status.
 	 */
+	
+	if (s->verb->next_part != NULL) {
+		char *varname = s->verb->string;
+		char *varvalue = get_word(s->verb->next_part->next_part);
+		//printf("%s %s\n", varname, varvalue);
+		setenv(varname, varvalue, 1);
+		free(varvalue);
+		return true;
+	}
+
 
 	/* TODO: If external command:
 	 *   1. Fork new process
@@ -105,8 +116,10 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		if (s->in != NULL) {
 			int fd = -1;
 			char input_path[1026];
-
-        	snprintf(input_path, sizeof(input_path), "%s/%s", cwd, s->in->string);
+			if (execute_cd)
+        		snprintf(input_path, sizeof(input_path), "%s/%s", cwd, s->in->string);
+			else
+				strcpy(input_path, s->in->string);
 
 			if (s->io_flags == IO_REGULAR) {
 				fd = open(input_path, O_RDONLY);
@@ -142,9 +155,11 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 			if (s->out != NULL) {
 				int fd = -1;
 				char output_path[1026];
-
-        		snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
-
+				if (execute_cd)
+        			snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
+				else
+					strcpy(output_path, s->out->string);
+				printf("%s\n", output_path);
 				if (s->io_flags == IO_REGULAR) {
 					fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 				} else if (s->io_flags == IO_OUT_APPEND) {
@@ -195,12 +210,18 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	} else {
 		int status;
 		waitpid(pid, &status, 0);
+		if (WEXITSTATUS(status) == 1)
+			return false;
+		else return true;
+		//result = WEXITSTATUS(status);
 		// if (WIFEXITED(status))
 		// 	return WEXITSTATUS(status);
 		// if (WIFSIGNALED(status))
 		// 	return WTERMSIG(status);
 	}
-	return result; /* TODO: Replace with actual exit status. */
+	//printf("Execution failed for '%s'\n", s->verb->string);
+	
+	return false; /* TODO: Replace with actual exit status. */
 }
 
 /**
@@ -210,8 +231,30 @@ static bool run_in_parallel(command_t *cmd1, command_t *cmd2, int level,
 		command_t *father)
 {
 	/* TODO: Execute cmd1 and cmd2 simultaneously. */
+	pid_t pidFirst, pidSecond;
+	int status1, status2;
 
-	return true; /* TODO: Replace with actual exit status. */
+	pidFirst = fork();
+
+	if (pidFirst < 0) {
+		return false;
+	} else if (pidFirst == 0) { // child
+		int status = parse_command(cmd1, level + 1, father);
+		exit(status);
+	}
+
+	pidSecond = fork();
+	if (pidSecond < 0) {
+		return false;
+	} else if (pidSecond == 0) { // child
+		int status = parse_command(cmd2, level + 1, father);
+		exit(status);
+	}
+	waitpid(pidFirst, &status1, 0);
+	waitpid(pidSecond, &status2, 0);
+	if (WIFEXITED(status1) && WIFEXITED(status2))
+		return true;
+	return false; /* TODO: Replace with actual exit status. */
 }
 
 /**
@@ -220,9 +263,58 @@ static bool run_in_parallel(command_t *cmd1, command_t *cmd2, int level,
 static bool run_on_pipe(command_t *cmd1, command_t *cmd2, int level,
 		command_t *father)
 {
+	/// pipe, fork, fork
 	/* TODO: Redirect the output of cmd1 to the input of cmd2. */
+	int orig_stdout = dup(STDOUT_FILENO);
+	int orig_stdin = dup(STDIN_FILENO);
+	int orig_stderr = dup(STDERR_FILENO);
+	int fd[2]; // fd[0] - read, fd[1] - write
+	pid_t pidFirst, pidSecond;
+	int status1, status2;
 
-	return true; /* TODO: Replace with actual exit status. */
+	pipe(fd);
+
+	pidFirst = fork();
+	if (pidFirst < 0) {
+		return false;
+	} else if (pidFirst == 0) { // child
+		close(fd[0]);
+		dup2(fd[1], STDOUT_FILENO);
+		close(fd[1]);
+		int status = parse_command(cmd1, level + 1, father);
+		exit(status);
+	} else {
+		
+	}
+
+	pidSecond = fork();
+	if (pidSecond < 0) {
+		return false;
+	} else if (pidSecond == 0) { // child
+		close(fd[1]);
+		dup2(fd[0], STDIN_FILENO);
+		close(fd[0]);
+		int status = parse_command(cmd2, level + 1, father);
+		exit(status);
+	} else {
+		
+	}
+	close(fd[0]);
+	close(fd[1]);
+	waitpid(pidFirst, &status1, 0);
+	waitpid(pidSecond, &status2, 0);
+
+
+	// restore original file descriptors
+	dup2(orig_stdout, STDOUT_FILENO);
+	dup2(orig_stdin, STDIN_FILENO);
+	dup2(orig_stderr, STDERR_FILENO);
+
+	// close auxiliary file descriptors
+	close(orig_stdout);
+	close(orig_stdin);
+	close(orig_stderr);
+	return WEXITSTATUS(status2); /* TODO: Replace with actual exit status. */
 }
 
 /**
@@ -251,6 +343,7 @@ int parse_command(command_t *c, int level, command_t *father)
 
 	case OP_PARALLEL:
 		/* TODO: Execute the commands simultaneously. */
+		result = run_in_parallel(c->cmd1, c->cmd2, level + 1, c);
 		break;
 
 	case OP_CONDITIONAL_NZERO:
@@ -258,7 +351,6 @@ int parse_command(command_t *c, int level, command_t *father)
 		 * returns non zero.
 		 */
 		result = parse_command(c->cmd1, level + 1, c);
-		printf("%d\n", result);
 		if (result == false) {
 			result = parse_command(c->cmd2, level + 1, c);
 		}
@@ -269,7 +361,6 @@ int parse_command(command_t *c, int level, command_t *father)
 		 * returns zero.
 		 */
 		result = parse_command(c->cmd1, level + 1, c);
-		printf("%d\n", result);
 		if (result == true) {
 			result = parse_command(c->cmd2, level + 1, c);
 		}
@@ -279,6 +370,7 @@ int parse_command(command_t *c, int level, command_t *father)
 		/* TODO: Redirect the output of the first command to the
 		 * input of the second.
 		 */
+		result = run_on_pipe(c->cmd1, c->cmd2, level + 1, c);
 		break;
 
 	default:
