@@ -36,7 +36,7 @@ static bool shell_cd(word_t *dir)
 static int shell_exit(void)
 {
 	/* TODO: Execute exit/quit. */
-	exit(SHELL_EXIT);
+	exit(0);
 	return SHELL_EXIT; /* TODO: Replace with actual exit code. */
 }
 
@@ -44,10 +44,119 @@ static int shell_exit(void)
  * Parse a simple command (internal, environment variable assignment,
  * external command).
  */
+
+static void doRedirection(simple_command_t *s, int execute_cd, char *cwd)
+{
+	if (s->in != NULL) {
+		int fd = -1;
+		char input_path[1026];
+		if (execute_cd)
+        	snprintf(input_path, sizeof(input_path), "%s/%s", cwd, s->in->string);
+		else
+			strcpy(input_path, s->in->string);
+			
+		if (s->in->next_part != NULL) {
+			strcat(input_path, get_word(s->in->next_part));
+		}
+
+		if (s->io_flags == IO_REGULAR) {
+			fd = open(input_path, O_RDONLY);
+		} else {
+			fd = open(input_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		}
+
+		DIE(fd < 0, "open stdin");
+		dup2(fd, STDIN_FILENO);
+		close(fd);
+	}
+
+	if (s->out != NULL && s->err != NULL) {
+		char output_path[1026];
+		char error_path[1026];
+
+		if (execute_cd) {
+			snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
+			snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
+		}
+		else {
+			strcpy(output_path, s->out->string);
+			strcpy(error_path, s->err->string);
+		}
+
+		if (s->out->next_part != NULL) {
+			strcat(output_path, get_word(s->out->next_part));
+		}
+
+		if (s->err->next_part != NULL) {
+			strcat(error_path, get_word(s->err->next_part));
+		}
+
+		int f_out = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		int f_err = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+		DIE(f_out < 0, "open stdout");
+		DIE(f_err < 0, "open stderr");
+
+		dup2(f_out, STDOUT_FILENO);
+		dup2(f_err, STDERR_FILENO);
+
+		close(f_out);
+		close(f_err);
+
+	} else {
+		if (s->out != NULL) {
+			int fd = -1;
+			char output_path[1026];
+			if (execute_cd)
+        		snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
+			else
+				strcpy(output_path, s->out->string);
+				
+			if (s->out->next_part != NULL) {
+				strcat(output_path, get_word(s->out->next_part));
+			}
+
+			if (s->io_flags == IO_REGULAR) {
+				fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			} else if (s->io_flags == IO_OUT_APPEND) {
+				fd = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+			}
+
+			DIE(fd < 0, "open stdout");
+			dup2(fd, STDOUT_FILENO);
+			close(fd);
+		}
+
+		if (s->err != NULL) {
+			int fd = -1;
+			char error_path[1026];
+
+			if (execute_cd)
+        		snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
+			else
+				strcpy(error_path, s->err->string);
+
+			if (s->err->next_part != NULL) {
+				strcat(error_path, get_word(s->err->next_part));
+			}
+
+			if (s->io_flags == IO_REGULAR) {
+				fd = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			} else if (s->io_flags == IO_ERR_APPEND) {
+				fd = open(error_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+			}
+
+			DIE(fd < 0, "open");
+			dup2(fd, STDERR_FILENO);
+			close(fd);
+		}
+	}	
+}
+
 static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
 	bool execute_cd = false;
-	int result = true;
+	int result = false;
 	char cwd[1024];
 
 	/* TODO: Sanity checks. */
@@ -64,13 +173,28 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		
 		if (s->params != NULL) {
 			execute_cd = true;
-			result = shell_cd(s->params);	
+			// auxiliary file descriptors used for restoring
+			int orig_stdout = dup(STDOUT_FILENO);
+			int orig_stdin = dup(STDIN_FILENO);
+			int orig_stderr = dup(STDERR_FILENO);
+
+			doRedirection(s, execute_cd, cwd);
+		
+			// restore original file descriptors
+			dup2(orig_stdout, STDOUT_FILENO);
+			dup2(orig_stdin, STDIN_FILENO);
+			dup2(orig_stderr, STDERR_FILENO);
+
+			// close auxiliary file descriptors
+			close(orig_stdout);
+			close(orig_stdin);
+			close(orig_stderr);
+			return shell_cd(s->params);	
 		}
 	}
 	
 	if (strcmp(s->verb->string, "exit") == 0 || strcmp(s->verb->string, "quit") == 0) {
-		fflush(stdout);
-		shell_exit();
+		return shell_exit();
 	}
 
 	if (strcmp(s->verb->string, "false") == 0) {
@@ -80,28 +204,15 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	if (strcmp(s->verb->string, "true") == 0) {
 		return true;
 	}
-
-	/* TODO: If variable assignment, execute the assignment and return
-	 * the exit status.
-	 */
 	
 	if (s->verb->next_part != NULL) {
-		char *varname = s->verb->string;
 		char *varvalue = get_word(s->verb->next_part->next_part);
-		//printf("%s %s\n", varname, varvalue);
-		setenv(varname, varvalue, 1);
+
+		setenv(s->verb->string, varvalue, 1);
 		free(varvalue);
 		return true;
 	}
 
-
-	/* TODO: If external command:
-	 *   1. Fork new process
-	 *     2c. Perform redirections in child
-	 *     3c. Load executable in child
-	 *   2. Wait for child
-	 *   3. Return exit status
-	 */
 	pid_t pid = fork();
 
 	if (pid == -1) {
@@ -113,90 +224,16 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		int orig_stdin = dup(STDIN_FILENO);
 		int orig_stderr = dup(STDERR_FILENO);
 
-		if (s->in != NULL) {
-			int fd = -1;
-			char input_path[1026];
-			if (execute_cd)
-        		snprintf(input_path, sizeof(input_path), "%s/%s", cwd, s->in->string);
-			else
-				strcpy(input_path, s->in->string);
-
-			if (s->io_flags == IO_REGULAR) {
-				fd = open(input_path, O_RDONLY);
-			} else {
-				fd = open(input_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-			}
-			DIE(fd < 0, "open stdin");
-			dup2(fd, STDIN_FILENO);
-			close(fd);
+		doRedirection(s, execute_cd, cwd);
+		
+		
+		int argc;
+		char **argv = get_argv(s, &argc);
+		if (execvp(argv[0], argv) == -1) {
+			exit(0);
 		}
-
-		if (s->out != NULL && s->err != NULL) {
-			char output_path[1026];
-			char error_path[1026];
-
-				
-        	snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
-			snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
-
-			int f_out = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-			int f_err = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-
-			DIE(f_out < 0, "open stdout");
-			DIE(f_err < 0, "open stderr");
-
-			dup2(f_out, STDOUT_FILENO);
-			dup2(f_err, STDERR_FILENO);
-
-			close(f_out);
-			close(f_err);
-
-		} else {
-			if (s->out != NULL) {
-				int fd = -1;
-				char output_path[1026];
-				if (execute_cd)
-        			snprintf(output_path, sizeof(output_path), "%s/%s", cwd, s->out->string);
-				else
-					strcpy(output_path, s->out->string);
-				printf("%s\n", output_path);
-				if (s->io_flags == IO_REGULAR) {
-					fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-				} else if (s->io_flags == IO_OUT_APPEND) {
-					fd = open(output_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-				}
-
-				DIE(fd < 0, "open stdout");
-				dup2(fd, STDOUT_FILENO);
-				close(fd);
-			}
-
-			if (s->err != NULL) {
-				int fd = -1;
-				char error_path[1026];
-
-				snprintf(error_path, sizeof(error_path), "%s/%s", cwd, s->err->string);
-
-				if (s->io_flags == IO_REGULAR) {
-					fd = open(error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-				} else if (s->io_flags == IO_ERR_APPEND) {
-					fd = open(error_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-				}
-
-				DIE(fd < 0, "open");
-				dup2(fd, STDERR_FILENO);
-				close(fd);
-			}
-		}
-
-		if (!execute_cd) {
-			int argc;
-			char **argv = get_argv(s, &argc);
-			if (execvp(argv[0], argv) == -1) {
-				result = false;
-			}
-		}
-
+		
+		
 		// restore original file descriptors
 		dup2(orig_stdout, STDOUT_FILENO);
 		dup2(orig_stdin, STDIN_FILENO);
@@ -212,16 +249,11 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		waitpid(pid, &status, 0);
 		if (WEXITSTATUS(status) == 1)
 			return false;
-		else return true;
-		//result = WEXITSTATUS(status);
-		// if (WIFEXITED(status))
-		// 	return WEXITSTATUS(status);
-		// if (WIFSIGNALED(status))
-		// 	return WTERMSIG(status);
+		else 
+			return true;
 	}
-	//printf("Execution failed for '%s'\n", s->verb->string);
 	
-	return false; /* TODO: Replace with actual exit status. */
+	return result; /* TODO: Replace with actual exit status. */
 }
 
 /**
@@ -263,7 +295,6 @@ static bool run_in_parallel(command_t *cmd1, command_t *cmd2, int level,
 static bool run_on_pipe(command_t *cmd1, command_t *cmd2, int level,
 		command_t *father)
 {
-	/// pipe, fork, fork
 	/* TODO: Redirect the output of cmd1 to the input of cmd2. */
 	int orig_stdout = dup(STDOUT_FILENO);
 	int orig_stdin = dup(STDIN_FILENO);
